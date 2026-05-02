@@ -1,0 +1,16 @@
+# PyTorch — install via conda (see setup instructions below)
+# conda install pytorch==1.13.1 torchvision==0.14.1 pytorch-cuda=11.7 -c pytorch -c nvidia
+
+# Core dependencies (pip install -r requirements.txt)
+torchvision>=0.9.0
+tensorboardX>=2.5
+tqdm>=4.62.0
+Pillow>=8.3.0
+numpy>=1.21.0
+
+# Image processing (metrics scripts)
+opencv-python>=4.5.0
+scikit-image>=0.19.0
+
+# Profiling (used in test_microAST.py but commented out)
+thop>=0.1.1
