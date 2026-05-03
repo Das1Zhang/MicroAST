@@ -397,7 +397,7 @@ class Net(nn.Module):
 class TestNet(nn.Module):
     def __init__(self, content_encoder, style_encoder, modulator, decoder):
         super(TestNet, self).__init__()
-        
+
         self.content_encoder = content_encoder
         self.style_encoder = style_encoder
         self.modulator = modulator
@@ -406,12 +406,74 @@ class TestNet(nn.Module):
 
     def forward(self, content, style, alpha=1.0):
         assert 0 <= alpha <= 1
-        
+
         style_feats = self.style_encoder(style)
         filter_weights, filter_biases = self.modulator(style_feats)
 
         content_feats = self.content_encoder(content)
-            
+
         res = self.decoder(content_feats, style_feats, filter_weights, filter_biases, alpha)
-        
+
         return res
+
+
+class VideoTestNet(nn.Module):
+    """Temporally consistent TestNet for video style transfer.
+
+    Wraps the standard TestNet with a TemporalSmoother that applies EMA-based
+    smoothing to content features, style features, and modulation signals
+    across consecutive video frames.
+
+    The smoothing is done in latent space (not pixel space), which prevents
+    ghosting artifacts while effectively suppressing flickering caused by
+    frame-to-frame feature jitter in the content encoder.
+
+    Usage:
+        net = VideoTestNet(content_enc, style_enc, modulator, decoder, momentum=0.7)
+        for frame in video_frames:
+            output = net(frame, style_image, alpha=1.0)
+            save(output)
+        net.reset_smoother()  # between videos or scene cuts
+    """
+    def __init__(self, content_encoder, style_encoder, modulator, decoder,
+                 momentum=0.7):
+        super(VideoTestNet, self).__init__()
+        # Import here to avoid circular dependency
+        from temporal_smoother import TemporalSmoother
+
+        self.content_encoder = content_encoder
+        self.style_encoder = style_encoder
+        self.modulator = modulator
+        self.decoder = decoder
+        self.smoother = TemporalSmoother(momentum=momentum)
+
+    def forward(self, content, style, alpha=1.0):
+        assert 0 <= alpha <= 1
+
+        # 1. Extract and temporally smooth style modulation signals
+        style_feats = self.style_encoder(style)
+        style_feats = self.smoother.smooth_style(style_feats)
+
+        filter_weights, filter_biases = self.modulator(style_feats)
+        filter_weights, filter_biases = self.smoother.smooth_modulation(
+            filter_weights, filter_biases)
+
+        # 2. Extract and temporally smooth content features
+        #    THIS IS THE KEY STEP: content features vary slightly between
+        #    adjacent frames, and the decoder amplifies these differences
+        #    into visible flicker. EMA smoothing in latent space suppresses
+        #    this jitter without causing ghosting.
+        content_feats = self.content_encoder(content)
+        content_feats = self.smoother.smooth_content(content_feats)
+
+        # 3. Decode with smoothed signals
+        res = self.decoder(content_feats, style_feats,
+                           filter_weights, filter_biases, alpha)
+        return res
+
+    def reset_smoother(self):
+        """Reset temporal buffers.
+
+        Call between different videos, after scene cuts, or when seeking.
+        """
+        self.smoother.reset()
