@@ -70,6 +70,39 @@ class SELayer(nn.Module):
         return x * y.expand_as(x)
 
 
+class StructureAwarenessBranch(nn.Module):
+    """Spatial structure awareness branch — generates structure preservation maps.
+
+    This extremely lightweight branch takes content encoder features and produces
+    a per-pixel structure preservation map. The map is used to spatially weight
+    the AdaIN style modulation in the Decoder:
+      - High map value → strong content structure (edges, textures, object boundaries)
+                         → reduce style intensity to preserve content
+      - Low map value  → smooth region (sky, background)
+                         → apply full style intensity
+
+    Architecture: two 3x3 convs with a C//8 bottleneck (~4.5K params each).
+    The 3x3 kernel provides local spatial pattern awareness beyond per-pixel
+    channel statistics, which is essential for detecting edges and textures.
+
+    No detach — gradients flow back to the content encoder, encouraging it to
+    produce features that are more structure-aware.
+    """
+    def __init__(self, channels):
+        super(StructureAwarenessBranch, self).__init__()
+        bottleneck = max(channels // 8, 4)  # ensure at least 4 channels
+        self.conv = nn.Sequential(
+            nn.Conv2d(channels, bottleneck, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(bottleneck, 1, kernel_size=3, padding=1),
+            nn.Sigmoid()  # outputs [0, 1] structure preservation weights
+        )
+
+    def forward(self, feat):
+        # feat: [B, C, H, W] → structure_map: [B, 1, H, W]
+        return self.conv(feat)
+
+
 # Control the number of channels
 slim_factor = 1
 
@@ -128,16 +161,31 @@ class Decoder(nn.Module):
         # 帮助解码器在上采样重建过程中聚焦关键特征通道
         self.se1 = SELayer(int(64*slim_factor), reduction=4)
         self.se2 = SELayer(int(64*slim_factor), reduction=4)
+        # 空间结构感知分支：从内容特征生成逐像素结构保持图，
+        # 用于对 AdaIN 风格注入做空间加权的调制
+        self.structure_branch_1 = StructureAwarenessBranch(int(64*slim_factor))
+        self.structure_branch_2 = StructureAwarenessBranch(int(64*slim_factor))
 
     def forward(self, x, s, w, b, alpha):
+        # --- 生成空间结构保持图 ---
+        # structure_map_1: 深层语义结构（物体轮廓、主体边界）
+        # structure_map_2: 浅层纹理结构（局部边缘、细节）
+        structure_map_1 = self.structure_branch_1(x[1])  # [B, 1, H, W]
+        structure_map_2 = self.structure_branch_2(x[0])  # [B, 1, H, W]
+
+        # --- 第一层风格注入（深层 AdaIN）：结构感知加权 ---
         x1 = featMod(x[1], s[1])
-        x1 = alpha * x1 + (1-alpha) * x[1]
+        # 结构越强的区域，风格化越弱（保留内容）；平滑区域充分风格化
+        spatial_alpha_1 = alpha * (1 - structure_map_1)
+        x1 = spatial_alpha_1 * x1 + (1 - spatial_alpha_1) * x[1]
 
         x2 = self.dec1(x1, w[1], b[1], filterMod=True)
         x2 = self.se1(x2)  # 通道注意力精炼第一层解码特征
 
+        # --- 第二层风格注入（浅层 AdaIN）：结构感知加权 ---
         x3 = featMod(x2, s[0])
-        x3 = alpha * x3 + (1-alpha) * x2
+        spatial_alpha_2 = alpha * (1 - structure_map_2)
+        x3 = spatial_alpha_2 * x3 + (1 - spatial_alpha_2) * x2
 
         x4 = self.dec2(x3, w[0], b[0], filterMod=True)
         x4 = self.se2(x4)  # 通道注意力精炼第二层解码特征
