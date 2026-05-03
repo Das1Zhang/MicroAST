@@ -37,6 +37,39 @@ class ResidualLayer(nn.Module):
         else: 
             return x + self.conv2(self.relu(self.conv1(x)))
 
+class SELayer(nn.Module):
+    """Squeeze-and-Excitation channel attention module.
+
+    Lightweight mechanism that adaptively recalibrates channel-wise feature
+    responses by explicitly modeling interdependencies between channels.
+    Computation overhead is negligible (< 1% FLOPs increase).
+
+    Squeeze: Global average pooling compresses spatial info into channel descriptors.
+    Excitation: Two FC layers learn channel-wise dependencies (C -> C/r -> C).
+    Scale: Attention weights are broadcast back to the spatial dimensions.
+
+    With reduction=4 and C=64, adds only ~2K parameters per SE block.
+    """
+    def __init__(self, channels, reduction=4):
+        super(SELayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        # Squeeze: H x W -> 1 x 1
+        y = self.avg_pool(x).view(b, c)
+        # Excitation: learn per-channel importance weights
+        y = self.fc(y).view(b, c, 1, 1)
+        # Scale: re-weight each channel
+        return x * y.expand_as(x)
+
+
 # Control the number of channels
 slim_factor = 1
 
@@ -59,10 +92,16 @@ class Encoder(nn.Module):
         self.enc2 = nn.Sequential(
             ResidualLayer(int(64*slim_factor), kernel_size=3)
             )
-        
+        # SE 通道注意力：在 enc1 和 enc2 输出后各加一个 SE 块，
+        # 让编码器在有限深度下自动强化最具代表性的特征通道
+        self.se1 = SELayer(int(64*slim_factor), reduction=4)
+        self.se2 = SELayer(int(64*slim_factor), reduction=4)
+
     def forward(self, x):
         x1 = self.enc1(x)
+        x1 = self.se1(x1)   # 通道注意力精炼浅层特征
         x2 = self.enc2(x1)
+        x2 = self.se2(x2)   # 通道注意力精炼深层特征
         out = [x1, x2]
         return out
 
@@ -85,17 +124,23 @@ class Decoder(nn.Module):
             nn.ReLU(inplace=True),
             ConvLayer(int(16*slim_factor), 3, kernel_size=9, stride=1, groupnum=1)
             )
-        
+        # SE 通道注意力：在 dec1 和 dec2 残差块输出后各加一个 SE 块，
+        # 帮助解码器在上采样重建过程中聚焦关键特征通道
+        self.se1 = SELayer(int(64*slim_factor), reduction=4)
+        self.se2 = SELayer(int(64*slim_factor), reduction=4)
+
     def forward(self, x, s, w, b, alpha):
         x1 = featMod(x[1], s[1])
         x1 = alpha * x1 + (1-alpha) * x[1]
 
         x2 = self.dec1(x1, w[1], b[1], filterMod=True)
-        
+        x2 = self.se1(x2)  # 通道注意力精炼第一层解码特征
+
         x3 = featMod(x2, s[0])
         x3 = alpha * x3 + (1-alpha) * x2
-        
+
         x4 = self.dec2(x3, w[0], b[0], filterMod=True)
+        x4 = self.se2(x4)  # 通道注意力精炼第二层解码特征
 
         out = self.dec3(x4)
         return out
