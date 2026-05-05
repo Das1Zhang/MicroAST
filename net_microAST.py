@@ -333,6 +333,31 @@ class Net(nn.Module):
         target_mean, target_std = calc_mean_std(target)
         return self.mse_loss(input_mean, target_mean) + \
                self.mse_loss(input_std, target_std)
+
+    def _pairwise_style_loss(self, A, B):
+        """Compute [B, B] pairwise style loss matrix on GPU.
+
+        Replaces the nested for-loop: for each (i, j), computes
+        calc_style_loss(A[i], B[j]) via broadcasting.
+
+        A, B: [B, C, H, W]
+        Returns: [B, B] where entry [i, j] = style_loss(A[i], B[j])
+        """
+        A_mean, A_std = calc_mean_std(A)  # [B, C, 1, 1]
+        B_mean, B_std = calc_mean_std(B)  # [B, C, 1, 1]
+        # Broadcasting: [B, 1, C, 1, 1] - [1, B, C, 1, 1] = [B, B, C, 1, 1]
+        mean_diff = (A_mean.unsqueeze(1) - B_mean.unsqueeze(0)).pow(2)
+        std_diff  = (A_std.unsqueeze(1)  - B_std.unsqueeze(0)).pow(2)
+        return (mean_diff + std_diff).mean(dim=2).view(A.size(0), B.size(0))
+
+    def _pairwise_content_loss(self, A, B):
+        """Compute [B, B] pairwise content loss matrix on GPU.
+
+        A, B: [B, C, 1, 1] (modulation signals)
+        Returns: [B, B] where entry [i, j] = mse(A[i], B[j])
+        """
+        diff = (A.unsqueeze(1) - B.unsqueeze(0)).pow(2)  # [B, B, C, 1, 1]
+        return diff.mean(dim=2).view(A.size(0), B.size(0))
     
     
 
@@ -363,33 +388,35 @@ class Net(nn.Module):
         res_style_feats = self.style_encoder(res)
         res_filter_weights, res_filter_biases = self.modulator(res_style_feats)
         
-        # style signal contrastive loss
-        loss_contrastive = 0.
-        for i in range(int(style.size(0))):
-            pos_loss = 0.
-            neg_loss = 0.
+        # --- style signal contrastive loss (vectorized) ---
+        # Replaces the original O(B^2) nested Python loop with GPU-parallel
+        # broadcasting.  Python-level iteration count drops from B^2 to zero;
+        # all pairwise distances are computed simultaneously on GPU.
 
-            for j in range(int(style.size(0))):
-                if j==i:
-                    FeatMod_loss = self.calc_style_loss(res_style_feats[0][i].unsqueeze(0), style_feats[0][j].unsqueeze(0)) + \
-                                   self.calc_style_loss(res_style_feats[1][i].unsqueeze(0), style_feats[1][j].unsqueeze(0))
-                    FilterMod_loss = self.calc_content_loss(res_filter_weights[0][i], filter_weights[0][j]) + \
-                                     self.calc_content_loss(res_filter_weights[1][i], filter_weights[1][j]) + \
-                                     self.calc_content_loss(res_filter_biases[0][i], filter_biases[0][j]) + \
-                                     self.calc_content_loss(res_filter_biases[1][i], filter_biases[1][j])
-                    pos_loss = FeatMod_loss + FilterMod_loss
-                else:
-                    FeatMod_loss = self.calc_style_loss(res_style_feats[0][i].unsqueeze(0), res_style_feats[0][j].unsqueeze(0)) + \
-                                   self.calc_style_loss(res_style_feats[1][i].unsqueeze(0), style_feats[1][j].unsqueeze(0))
-                    FilterMod_loss = self.calc_content_loss(res_filter_weights[0][i], filter_weights[0][j]) + \
-                                     self.calc_content_loss(res_filter_weights[1][i], filter_weights[1][j]) + \
-                                     self.calc_content_loss(res_filter_biases[0][i], filter_biases[0][j]) + \
-                                     self.calc_content_loss(res_filter_biases[1][i], filter_biases[1][j])
-                    neg_loss = neg_loss + FeatMod_loss + FilterMod_loss
-                    
-        
-            loss_contrastive = loss_contrastive + pos_loss/neg_loss
-                                   
+        # FeatMod pairwise matrices
+        # pos:  res vs style  (both levels)
+        # neg:  res vs RES    (level 0), res vs style (level 1)
+        fm_pos_0 = self._pairwise_style_loss(res_style_feats[0], style_feats[0])
+        fm_pos_1 = self._pairwise_style_loss(res_style_feats[1], style_feats[1])
+        fm_neg_0 = self._pairwise_style_loss(res_style_feats[0], res_style_feats[0])
+        fm_neg_1 = fm_pos_1  # identical: res vs style
+
+        featmod_pos = fm_pos_0 + fm_pos_1  # [B, B]
+        featmod_neg = fm_neg_0 + fm_neg_1  # [B, B]
+
+        # FilterMod pairwise matrix (same for pos and neg: all res vs style)
+        filtermod = (self._pairwise_content_loss(res_filter_weights[0], filter_weights[0]) +
+                     self._pairwise_content_loss(res_filter_weights[1], filter_weights[1]) +
+                     self._pairwise_content_loss(res_filter_biases[0],  filter_biases[0]) +
+                     self._pairwise_content_loss(res_filter_biases[1],  filter_biases[1]))
+
+        # pos[i] = diagonal, neg[i] = sum of each row excluding diagonal
+        pos = featmod_pos.diag() + filtermod.diag()                  # [B]
+        neg = ((featmod_neg + filtermod).sum(dim=1)
+               - (featmod_neg.diag() + filtermod.diag()))           # [B]
+
+        loss_contrastive = (pos / neg).sum()
+
         return res, loss_c, loss_s, loss_contrastive
     
 
