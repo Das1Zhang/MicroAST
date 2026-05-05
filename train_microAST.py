@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 import torch.backends.cudnn as cudnn
+from torch.cuda.amp import autocast, GradScaler
 import torch.nn as nn
 import torch.utils.data as data
 from PIL import Image, ImageFile
@@ -143,21 +144,30 @@ if args.resume:
     network.load_state_dict(checkpoints['net'])
     optimizer.load_state_dict(checkpoints['optimizer'])
     start_iter = checkpoints['epoch']
+    if 'scaler' in checkpoints:
+        scaler.load_state_dict(checkpoints['scaler'])
+
+# AMP mixed precision: uses FP16 where safe, speeding up training ~1.5-2x
+# on GPUs with Tensor Cores (T4, V100, A100) without affecting output quality
+scaler = GradScaler()
 
 # training
 for i in tqdm(range(start_iter+1, args.max_iter)):
     adjust_learning_rate(optimizer, iteration_count=i)
     content_images = next(content_iter).to(device)
     style_images = next(style_iter).to(device)
-    stylized_results, loss_c, loss_s, loss_contrastive = network(content_images, style_images)
+    # autocast enables FP16 for matmul/conv ops, keeps loss-relevant ops in FP32
+    with autocast():
+        stylized_results, loss_c, loss_s, loss_contrastive = network(content_images, style_images)
     loss_c = args.content_weight * loss_c
     loss_s = args.style_weight * loss_s
     loss_contrastive = args.SSC_weight * loss_contrastive
     loss = loss_c + loss_s + loss_contrastive
 
     optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    scaler.scale(loss).backward()  # scales loss to prevent FP16 underflow
+    scaler.step(optimizer)         # unscale + optimizer step
+    scaler.update()                # adjust scale for next iteration
 
     writer.add_scalar('loss_content', loss_c.item(), i + 1)
     writer.add_scalar('loss_style', loss_s.item(), i + 1)
@@ -204,6 +214,7 @@ for i in tqdm(range(start_iter+1, args.max_iter)):
         checkpoints = {
             "net": network.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict(),  # AMP scale state for resume
             "epoch": i
         }
         torch.save(checkpoints, checkpoints_dir / 'checkpoints.pth.tar')  
