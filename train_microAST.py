@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 import torch.backends.cudnn as cudnn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torch.nn as nn
 import torch.utils.data as data
 from PIL import Image, ImageFile
@@ -101,7 +101,7 @@ checkpoints_dir.mkdir(exist_ok=True, parents=True)
 writer = SummaryWriter(log_dir=str(log_dir))
 
 vgg = net.vgg
-vgg.load_state_dict(torch.load(args.vgg))
+vgg.load_state_dict(torch.load(args.vgg, weights_only=True))
 vgg = nn.Sequential(*list(vgg.children())[:31])
 
 content_encoder = net.Encoder()
@@ -149,7 +149,7 @@ if args.resume:
 
 # AMP mixed precision: uses FP16 where safe, speeding up training ~1.5-2x
 # on GPUs with Tensor Cores (T4, V100, A100) without affecting output quality
-scaler = GradScaler()
+scaler = GradScaler('cuda')
 
 # training
 for i in tqdm(range(start_iter+1, args.max_iter)):
@@ -157,7 +157,7 @@ for i in tqdm(range(start_iter+1, args.max_iter)):
     content_images = next(content_iter).to(device)
     style_images = next(style_iter).to(device)
     # autocast enables FP16 for matmul/conv ops, keeps loss-relevant ops in FP32
-    with autocast():
+    with autocast('cuda'):
         stylized_results, loss_c, loss_s, loss_contrastive = network(content_images, style_images)
     loss_c = args.content_weight * loss_c
     loss_s = args.style_weight * loss_s

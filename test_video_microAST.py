@@ -158,10 +158,10 @@ style_encoder.eval()
 modulator.eval()
 decoder.eval()
 
-content_encoder.load_state_dict(torch.load(args.content_encoder))
-style_encoder.load_state_dict(torch.load(args.style_encoder))
-modulator.load_state_dict(torch.load(args.modulator))
-decoder.load_state_dict(torch.load(args.decoder))
+content_encoder.load_state_dict(torch.load(args.content_encoder, weights_only=True))
+style_encoder.load_state_dict(torch.load(args.style_encoder, weights_only=True))
+modulator.load_state_dict(torch.load(args.modulator, weights_only=True))
+decoder.load_state_dict(torch.load(args.decoder, weights_only=True))
 
 # VideoTestNet wraps TestNet with TemporalSmoother for EMA-based
 # temporal consistency across consecutive frames
