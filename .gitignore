@@ -24,7 +24,7 @@ wikiart/
 train2014.zip
 
 # Inference output
-output/
+
 
 # Jupyter
 .ipynb_checkpoints/
