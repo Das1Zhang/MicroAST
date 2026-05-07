@@ -16,8 +16,6 @@ import net_microAST as net
 from sampler import InfiniteSamplerWrapper
 
 cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True   # TF32 matmul on Ampere+ (~1.3x free)
-torch.backends.cudnn.allow_tf32 = True         # TF32 cuDNN convolutions
 Image.MAX_IMAGE_PIXELS = None  # Disable DecompressionBombError
 # Disable OSError: image file is truncated
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -114,7 +112,6 @@ decoder = net.Decoder()
 network = net.Net(vgg, content_encoder, style_encoder, modulator, decoder)
 network.train()
 network.to(device)
-network = torch.compile(network, mode='reduce-overhead')  # ~1.3x on Blackwell sm_120
 
 content_tf = train_transform()
 style_tf = train_transform()
@@ -141,6 +138,12 @@ optimizer = torch.optim.Adam([
 
 start_iter = -1
 
+
+# AMP mixed precision: uses FP16 where safe, speeding up training ~1.5-2x
+# on GPUs with Tensor Cores (T4, V100, A100) without affecting output quality
+scaler = GradScaler('cuda')
+
+
 # continue training from the checkpoint
 if args.resume:
     checkpoints = torch.load(args.checkpoints + '/checkpoints.pth.tar')
@@ -150,9 +153,6 @@ if args.resume:
     if 'scaler' in checkpoints:
         scaler.load_state_dict(checkpoints['scaler'])
 
-# AMP mixed precision: uses FP16 where safe, speeding up training ~1.5-2x
-# on GPUs with Tensor Cores (T4, V100, A100) without affecting output quality
-scaler = GradScaler('cuda')
 
 # training
 for i in tqdm(range(start_iter+1, args.max_iter)):
