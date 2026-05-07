@@ -15,16 +15,13 @@ env/
 
 # PyTorch model checkpoints & training outputs
 exp/
-logs/
+
 samples/
-checkpoints/
-*.pth.tar
-!models/*.pth.tar
 
 # Dataset directories
 coco2014/
 wikiart/
-*.zip
+train2014.zip
 
 # Inference output
 output/
