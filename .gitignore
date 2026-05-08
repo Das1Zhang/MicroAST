@@ -40,3 +40,7 @@ train2014.zip
 .DS_Store
 Thumbs.db
 desktop.ini
+
+*.md
+!README.md
+!models/README.md

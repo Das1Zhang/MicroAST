@@ -1,4 +1,7 @@
+# 该脚本用于下载数据并进行解压缩处理
 set -e
+pip install thop
+
 pip install huggingface_hub
 
 huggingface-cli login
@@ -19,4 +22,6 @@ python train_microAST.py \
     --save_dir ./exp \
     --checkpoints ./checkpoints \
     --log_dir ./logs \
-    --sample_path ./samples
+    --sample_path ./samples \
+    --n_threads 8 \
+    --output ./output

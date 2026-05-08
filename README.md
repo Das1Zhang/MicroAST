@@ -33,6 +33,16 @@ We have released the codes for calculating SSIM/Style Loss/Content Loss metrics!
 
   `python test_microAST.py --content_dir inputs/content/ --style_dir inputs/style/`
 
+
+python test_microAST.py \
+      --content_encoder ./exp/content_encoder_iter_160000.pth.tar \
+      --style_encoder ./exp/style_encoder_iter_160000.pth.tar \
+      --modulator ./exp/modulator_iter_160000.pth.tar \
+      --decoder ./exp/decoder_iter_160000.pth.tar \
+      --content_dir inputs/content/ \
+      --style_dir inputs/style/ \
+      --output ./output
+      
 **Train:**
 
 - Download content dataset [MS-COCO](https://cocodataset.org/#download) and style dataset [WikiArt](https://www.kaggle.com/c/painter-by-numbers) and then extract them.
